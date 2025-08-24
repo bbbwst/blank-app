@@ -74,7 +74,7 @@ class UNet(nn.Module):
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
         self.outc = OutConv(64, n_classes)
-    def forward(self, x):
+    def forward(self, x, return_attention=False):
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
@@ -85,6 +85,8 @@ class UNet(nn.Module):
         x = self.up3(x, x2)
         x = self.up4(x, x1)
         logits = self.outc(x)
+        if return_attention:
+            return logits, x5
         return logits
 
 # -----------------------------
@@ -101,11 +103,27 @@ model.eval()
 # -----------------------------
 st.title("🫁 Lung Nodule Segmentation with UNet")
 
+# Sample slider for images in Sample/
+import os
+sample_dir = "Sample"
+sample_files = [f for f in os.listdir(sample_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+if sample_files:
+    selected_file = st.selectbox("Select a sample image to preview", sample_files)
+    sample_path = os.path.join(sample_dir, selected_file)
+    st.image(sample_path, caption=f"Sample: {selected_file}", use_container_width=True)
+    use_sample = st.checkbox("Use this sample for prediction", value=False)
+else:
+    use_sample = False
+
 uploaded_file = st.file_uploader("Upload a CT scan slice (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
-if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert("L")
-    st.image(image, caption="Uploaded Image", use_container_width=True)
+if uploaded_file is not None or (use_sample and sample_files):
+    if use_sample and sample_files:
+        image = Image.open(sample_path).convert("L")
+        st.image(image, caption=f"Sample: {os.path.basename(sample_path)}", use_container_width=True)
+    else:
+        image = Image.open(uploaded_file).convert("L")
+        st.image(image, caption="Uploaded Image", use_container_width=True)
 
     # Preprocess
     transform = transforms.Compose([
@@ -118,7 +136,22 @@ if uploaded_file is not None:
     with torch.no_grad():
         output = model(input_tensor)
         pred = torch.sigmoid(output)
-        pred_mask = (pred > 0.5).float().cpu().squeeze().numpy()
+        pred_mask = (pred > 0.5).float().cpu().numpy()
+        # If pred_mask has shape (batch, channels, H, W), select the first batch and class/channel
+        if pred_mask.ndim == 4:
+            pred_mask = pred_mask[0]
+        if pred_mask.shape[0] > 1:
+            # For multi-class, select the foreground class (e.g., class 1)
+            pred_mask = pred_mask[1]
+        else:
+            pred_mask = pred_mask[0]
 
-    mask_img = Image.fromarray((pred_mask * 255).astype(np.uint8))
-    st.image(mask_img, caption="Predicted Mask", use_container_width=True)
+    # Overlay mask in red on the original image
+    orig_img = image.resize((256, 256)).convert("RGB")
+    mask_rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+    mask_rgba[..., 0] = (pred_mask * 255).astype(np.uint8)  # Red channel
+    mask_rgba[..., 3] = (pred_mask * 220).astype(np.uint8)  # Alpha channel for stronger red
+    mask_overlay = Image.fromarray(mask_rgba, mode="RGBA")
+    overlayed = orig_img.copy()
+    overlayed.paste(mask_overlay, (0, 0), mask_overlay)
+    st.image(overlayed, caption="Predicted Mask (Red Overlay)", use_container_width=True)
